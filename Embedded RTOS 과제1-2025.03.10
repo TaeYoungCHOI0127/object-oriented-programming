@@ -1,0 +1,170 @@
+cpp
+복사편집
+#include <Arduino_FreeRTOS.h>#include <timers.h>// 핀 설정
+#define LED_PIN 13
+#define BUTTON_PIN 2
+
+// LED 점멸 주기 (ms)
+volatile int blinkInterval = 500;
+
+// 인터럽트 플래그
+volatile bool buttonPressed = false;
+
+// 타이머 핸들
+TimerHandle_t ledTimer;
+
+// 인터럽트 서비스 루틴
+void IRAM_ATTR buttonISR() {
+    buttonPressed = true;
+}
+
+// LED 타이머 콜백 함수
+void vLedTimerCallback(TimerHandle_t xTimer) {
+    static bool ledState = false;
+    digitalWrite(LED_PIN, ledState);
+    ledState = !ledState;
+}
+
+// 버튼 감지 태스크
+void ButtonTask(void *pvParameters) {
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonISR, FALLING);
+
+    for (;;) {
+        if (buttonPressed) {
+            buttonPressed = false;
+            // 점멸 속도 변경 (500ms -> 250ms -> 100ms -> 다시 500ms)
+            blinkInterval = (blinkInterval == 500) ? 250 : (blinkInterval == 250 ? 100 : 500);
+            xTimerChangePeriod(ledTimer, pdMS_TO_TICKS(blinkInterval), 0);
+        }
+        vTaskDelay(pdMS_TO_TICKS(50)); // 50ms 주기로 확인
+    }
+}
+
+void setup() {
+    pinMode(LED_PIN, OUTPUT);
+    Serial.begin(9600);
+
+    // LED 제어 타이머 생성 (주기적으로 LED 깜빡임)
+    ledTimer = xTimerCreate("LedTimer", pdMS_TO_TICKS(blinkInterval), pdTRUE, (void *)0, vLedTimerCallback);
+    xTimerStart(ledTimer, 0);
+
+    // 태스크 생성
+    xTaskCreate(ButtonTask, "Button Task", 128, NULL, 2, NULL);
+}
+
+void loop() {}
+
+---
+
+cpp
+복사편집
+#include <Arduino_FreeRTOS.h>#include <queue.h>#define SENSOR_PIN A0
+
+QueueHandle_t sensorQueue;
+
+// ADC 센서 읽기 태스크
+void SensorReadTask(void *pvParameters) {
+    int sensorValue;
+    for (;;) {
+        sensorValue = analogRead(SENSOR_PIN);
+        xQueueSend(sensorQueue, &sensorValue, portMAX_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(200)); // 200ms 간격으로 읽기
+    }
+}
+
+// 시리얼 출력 태스크
+void SerialPrintTask(void *pvParameters) {
+    int receivedValue;
+    for (;;) {
+        if (xQueueReceive(sensorQueue, &receivedValue, portMAX_DELAY)) {
+            Serial.print("ADC Value: ");
+            Serial.println(receivedValue);
+        }
+    }
+}
+
+void setup() {
+    Serial.begin(9600);
+    pinMode(SENSOR_PIN, INPUT);
+
+    // 큐 생성 (정수형 데이터 저장)
+    sensorQueue = xQueueCreate(10, sizeof(int));
+
+    // 태스크 생성
+    xTaskCreate(SensorReadTask, "Sensor Read", 128, NULL, 2, NULL);
+    xTaskCreate(SerialPrintTask, "Serial Print", 128, NULL, 1, NULL);
+}
+
+void loop() {}
+
+---
+
+cpp
+복사편집
+#include <Arduino_FreeRTOS.h>#include <semphr.h>#include <Wire.h>#include <Adafruit_GFX.h>#include <Adafruit_SSD1306.h>#define TRIG_PIN 9
+#define ECHO_PIN 10
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 32
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+SemaphoreHandle_t xSensorSemaphore;
+
+// 거리 측정 함수
+float measureDistance() {
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+    long duration = pulseIn(ECHO_PIN, HIGH);
+    return duration * 0.034 / 2;
+}
+
+// 초음파 센서 태스크
+void SensorTask(void *pvParameters) {
+    float distance;
+    for (;;) {
+        if (xSemaphoreTake(xSensorSemaphore, portMAX_DELAY)) {
+            distance = measureDistance();
+            Serial.print("Distance: ");
+            Serial.println(distance);
+            xSemaphoreGive(xSensorSemaphore);
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+// OLED 출력 태스크
+void DisplayTask(void *pvParameters) {
+    for (;;) {
+        if (xSemaphoreTake(xSensorSemaphore, portMAX_DELAY)) {
+            display.clearDisplay();
+            display.setTextSize(1);
+            display.setTextColor(SSD1306_WHITE);
+            display.setCursor(0, 0);
+            display.println("Measuring...");
+            display.display();
+            xSemaphoreGive(xSensorSemaphore);
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+void setup() {
+    Serial.begin(9600);
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
+
+    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+        Serial.println("OLED init failed");
+        for (;;);
+    }
+
+    xSensorSemaphore = xSemaphoreCreateMutex();
+
+    xTaskCreate(SensorTask, "Sensor Task", 128, NULL, 2, NULL);
+    xTaskCreate(DisplayTask, "Display Task", 128, NULL, 1, NULL);
+}
+
+void loop() {}
